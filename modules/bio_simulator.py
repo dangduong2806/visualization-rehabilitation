@@ -1,185 +1,260 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import math
 
-class BioSimulator(nn.Module):
+class BioSimulatorHILO(nn.Module):
+    
     def __init__(self, device=torch.device('cpu'), grid_shape=(32, 32), output_size=(256, 256)):
-        super(BioSimulator, self).__init__()
+        super(BioSimulatorHILO, self).__init__()
         self.device = device
         self.output_size = output_size
         self.grid_shape = grid_shape
-        
-        # --- CONSTANTS (Giữ nguyên từ file gốc) ---
+
         self.k, self.a, self.b = 17.3, 0.75, 120.0
+        self.spread = 675.0e-6 
+        self.r2s = 0.5
         self.slope = 19152642.5
         self.half = 1.057e-7      
         self.rheo = 23.9e-6       
         self.freq = 300.0             
         self.pw = 170.0e-6   
-        self.r2s = 0.5
 
-        # --- 1. BASE GRID (Lưới điện cực gốc - chưa biến đổi) ---
-        # Tọa độ gốc (đơn vị độ thị giác - dva)
         xc = torch.linspace(-15, 15, grid_shape[0], device=device)
         yc = torch.linspace(-15, 15, grid_shape[1], device=device)
+        gx, gy = torch.meshgrid(xc, yc, indexing='xy')
         
-        # Meshgrid và Flatten ngay từ đầu để dùng cho batch
-        self.gx_base, self.gy_base = torch.meshgrid(xc, yc, indexing='xy')
-        self.gx_base = self.gx_base.flatten().view(1, -1) # Shape: (1, N)
-        self.gy_base = self.gy_base.flatten().view(1, -1)
-
-        # --- 2. OUTPUT PIXEL GRID (Lưới pixel màn hình) ---
-        rx, ry = output_size
-        self.fov = 30.0 
-        xs = torch.linspace(-self.fov, self.fov, rx, device=device)
-        ys = torch.linspace(-self.fov, self.fov, ry, device=device)
+        self.register_buffer('gx_base', gx.flatten().view(1, -1))
+        self.register_buffer('gy_base', gy.flatten().view(1, -1))
         
-        self.px, self.py = torch.meshgrid(xs, ys, indexing='xy')
-        # Shape: (1, 1, H, W) để broadcast với Batch
-        self.px = self.px.view(1, 1, rx, ry) 
-        self.py = self.py.view(1, 1, rx, ry)
-        
-        # Hệ số chuyển đổi độ sang pixel
-        self.deg2pix = output_size[0] / (self.fov * 2)
-
-        # Biến lưu trạng thái (State) sau khi Config
-        self.state = {}
-
-    # =========================================================================
-    # LUỒNG 1: BƯỚC CẤU HÌNH (CONFIGURATION STEP)
-    # Nhiệm vụ: Xây dựng hình học mắt và Implant từ tham số bệnh nhân
-    # =========================================================================
-    def configure_model(self, patient_params):
-        """
-        Input: patient_params (Batch, 13) - Giá trị thực
-        Output: Không trả về (hoặc trả về self), nhưng cập nhật self.state
-        """
-        batch_size = patient_params.shape[0]
-
-        # 1.1. Giải nén tham số (Unpack)
-        # Nhóm tham số vật lý (lưu lại để dùng cho bước Stimulation)
-        self.state['rho'] = patient_params[:, 0].view(batch_size, 1, 1, 1) # (B, 1, 1, 1)
-        
-        # Nhóm hệ số độ sáng đa thức (a0 - a4)
-        self.state['coeffs'] = {
-            'a0': patient_params[:, 3].view(batch_size, 1, 1),
-            'a1': patient_params[:, 4].view(batch_size, 1, 1),
-            'a2': patient_params[:, 5].view(batch_size, 1, 1),
-            'a3': patient_params[:, 6].view(batch_size, 1, 1),
-            'a4': patient_params[:, 7].view(batch_size, 1, 1)
-        }
-
-        # Nhóm tham số hình học (Implant Geometry)
-        x_imp = patient_params[:, 10].view(batch_size, 1) # Shift x (microns)
-        y_imp = patient_params[:, 11].view(batch_size, 1) # Shift y (microns)
-        rot   = patient_params[:, 12].view(batch_size, 1) # Rotation (degrees)
-
-        # 1.2. Biến đổi Affine (Xoay & Tịnh tiến Implant)
-        theta = torch.deg2rad(rot)
-        cos_t = torch.cos(theta)
-        sin_t = torch.sin(theta)
-
-        # Chuyển đổi micron sang độ (giả sử 1 độ ~ 300 micron)
-        dx = x_imp / 300.0
-        dy = y_imp / 300.0
-
-        # Công thức xoay vector [x, y]
-        gx_new = self.gx_base * cos_t - self.gy_base * sin_t + dx
-        gy_new = self.gx_base * sin_t + self.gy_base * cos_t + dy
-
-        # 1.3. Ánh xạ Retino-Cortical (Model Mắt)
-        # Mapping từ Võng mạc (w) -> Vỏ não (z)
-        w = torch.complex(gx_new, gy_new) 
+        w = torch.complex(gx, gy)
         ewk = torch.exp(w / self.k)
         z = (self.a * self.b * (ewk - 1)) / (self.b - self.a * ewk)
         
-        # Lấy tọa độ trung tâm phosphene trên vỏ não
-        vx = z.real.view(batch_size, -1, 1, 1) # (B, N, 1, 1)
-        vy = z.imag.view(batch_size, -1, 1, 1)
+        vx_default = z.real.flatten()
+        vy_default = z.imag.flatten()
+        
+        max_ecc = max(vx_default.abs().max(), vy_default.abs().max()).item()
+        self.fov = max_ecc * 1.1
+        
+        valid = (torch.abs(vx_default) < 90)
+        r = torch.abs(z).flatten()
+        M_default = self.k * (1.0 / (r + self.a) - 1.0 / (r + self.b))
+        
+        self.register_buffer('idx', torch.nonzero(valid.flatten()).squeeze())
+        self.n_valid = self.idx.shape[0]
+        
+        rx, ry = output_size
+        xs = torch.linspace(-self.fov, self.fov, rx, device=device)
+        ys = torch.linspace(-self.fov, self.fov, ry, device=device)
+        
+        px, py = torch.meshgrid(xs, ys, indexing='xy')
+        self.register_buffer('px', px.view(1, 1, rx, ry))
+        self.register_buffer('py', py.view(1, 1, rx, ry))
+        
+        self.deg2pix = output_size[0] / (self.fov * 2)
+        
+        # default patient params
+        default_phi = torch.zeros(1, 13, device=device)
+        default_phi[0, 3] = 1.0
+        default_phi[0, 4] = 1.0
+        default_phi[0, 5] = 1.0
+        default_phi[0, 6] = 1.0
+        default_phi[0, 7] = 1.0
+        self.register_buffer('default_phi', default_phi)
 
-        # Tính hệ số phóng đại vỏ não (Cortical Magnification)
+    def sigmoid(self, x):
+        return 1.0 / (1.0 + torch.exp(-x))
+    
+    def _apply_implant_geometry(self, phi):
+        """        
+        Args:
+            phi: (B, 13) patient parameters
+            
+        Returns:
+            gx, gy: (B, N) tọa độ điện cực đã transform
+        """
+        batch_size = phi.shape[0]
+        
+        x_shift = phi[:, 0].view(batch_size, 1)  # mm → độ
+        y_shift = phi[:, 1].view(batch_size, 1)
+        rotation = phi[:, 2].view(batch_size, 1)  # độ
+        
+        dx = x_shift * 3.5
+        dy = y_shift * 3.5
+        
+        theta = torch.deg2rad(rotation)
+        cos_t = torch.cos(theta)
+        sin_t = torch.sin(theta)
+        
+        # Affine transform
+        # gx_base, gy_base: (1, N)
+        gx = self.gx_base * cos_t - self.gy_base * sin_t + dx
+        gy = self.gx_base * sin_t + self.gy_base * cos_t + dy
+        
+        return gx, gy  # (B, N)
+    
+    def _compute_cortical_mapping(self, gx, gy):
+        """
+        Retino-Cortical
+        
+        Args:
+            gx, gy: (B, N) tọa độ điện cực
+            
+        Returns:
+            vx, vy: (B, N) tọa độ trên vỏ não
+            M: (B, N) hệ số phóng đại
+        """
+        w = torch.complex(gx, gy)
+        ewk = torch.exp(w / self.k)
+        z = (self.a * self.b * (ewk - 1)) / (self.b - self.a * ewk)
+        
+        vx = z.real
+        vy = z.imag
         r = torch.abs(z)
         M = self.k * (1.0 / (r + self.a) - 1.0 / (r + self.b))
-        self.state['M'] = M.view(batch_size, -1, 1, 1)
-
-        # 1.4. Tính trước khoảng cách (Pre-compute Distance Matrix)
-        # Tính khoảng cách từ mọi pixel màn hình đến mọi tâm phosphene
-        # (x - vx)^2 + (y - vy)^2
-        diff_x = (self.px - vx) * self.deg2pix
-        diff_y = (self.py - vy) * self.deg2pix
         
-        # Lưu dist^2 để bước sau chỉ cần exp()
-        self.state['dist2'] = diff_x**2 + diff_y**2
-        
-        return self
+        return vx, vy, M
 
-    # =========================================================================
-    # LUỒNG 2: BƯỚC KÍCH THÍCH (STIMULATION STEP)
-    # Nhiệm vụ: Tính toán phản ứng điện và vẽ ảnh dựa trên Cấu hình đã có
-    # =========================================================================
-    def produce_stimulation(self, stimulation_pattern):
+    def forward(self, stimulation, phi=None):
         """
-        Input: stimulation_pattern (Batch, 1, 32, 32) - Đầu ra Encoder
-        Output: Phosphene Image (Batch, 1, H, W)
-        """
-        if not self.state:
-            raise RuntimeError("Model chưa được cấu hình! Hãy gọi configure_model() trước.")
-
-        batch_size = stimulation_pattern.shape[0]
-        flat_stim = stimulation_pattern.view(batch_size, -1) # (B, N)
+        Forward pass của simulator
         
-        # 2.1. Mô phỏng Điện sinh học (Bio-physics)
-        # Từ Biên độ kích thích -> Dòng điện -> Độ sáng chủ quan
-        I = flat_stim * 80.0e-6 
-        I_eff = torch.relu(I - self.rheo)
+        Args:
+            stimulation: (B, 1, 32, 32) output từ encoder
+            phi: (B, 13) patient parameters, None = dùng default
+            
+        Returns:
+            phosphene: (B, 1, H, W) ảnh mô phỏng
+        """
+        batch_size = stimulation.shape[0]
+        
+        if phi is None:
+            phi = self.default_phi.expand(batch_size, -1)
+        
+        if phi.dim() == 1:
+            phi = phi.unsqueeze(0)
+        if phi.shape[0] == 1 and batch_size > 1:
+            phi = phi.expand(batch_size, -1)
+            
+        spread_scale = phi[:, 3].view(batch_size, 1).clamp(min=0.1, max=10.0)
+        brightness_scale = phi[:, 4].view(batch_size, 1).clamp(min=0.1, max=5.0)
+        size_scale = phi[:, 5].view(batch_size, 1).clamp(min=0.1, max=5.0)
+        threshold_scale = phi[:, 6].view(batch_size, 1).clamp(min=0.1, max=5.0)
+        contrast = phi[:, 7].view(batch_size, 1).clamp(min=0.1, max=5.0)
+        
+        has_geometry_change = (phi[:, 0:3].abs().sum() > 1e-6)
+        
+        if has_geometry_change:
+            gx, gy = self._apply_implant_geometry(phi)
+            vx, vy, M = self._compute_cortical_mapping(gx, gy)
+            
+            # Filter valid points (trong FOV)
+            vx = vx.view(batch_size, -1, 1, 1)
+            vy = vy.view(batch_size, -1, 1, 1)
+            M = M.view(batch_size, -1, 1, 1)
+            
+            flat = stimulation.view(batch_size, -1)
+        else:
+            gx, gy = self.gx_base, self.gy_base
+            vx, vy, M = self._compute_cortical_mapping(gx, gy)
+            
+            vx = vx[:, self.idx].view(batch_size, -1, 1, 1)
+            vy = vy[:, self.idx].view(batch_size, -1, 1, 1)
+            M = M[:, self.idx].view(batch_size, -1, 1, 1)
+            
+            flat = stimulation.view(batch_size, -1)
+            flat = flat[:, self.idx]
+        
+        I = flat * 80.0e-6
+        
+        rheo_adjusted = self.rheo * threshold_scale
+        I_eff = torch.relu(I - rheo_adjusted)
         Q = I_eff * self.pw * self.freq
         
         B_logit = self.slope * (Q - self.half)
         B = self.sigmoid(B_logit)
-        B = B.view(batch_size, -1, 1, 1) # (B, N, 1, 1)
-
-        # 2.2. Tính kích thước phosphene (Sigma)
-        # Sigma phụ thuộc vào cường độ I và tham số Rho của bệnh nhân
-        rho = self.state['rho']
-        M = self.state['M']
         
-        # Công thức: spread càng lớn (rho nhỏ) -> size càng to? 
-        # Hoặc rho là bán kính lan tỏa. Tùy định nghĩa dataset.
-        # Ở đây giả định rho là spread factor.
-        size_base = torch.sqrt(I / (rho + 1e-9)) 
-        size_base = size_base.view(batch_size, -1, 1, 1)
+        B = B * brightness_scale
+        B = torch.pow(B, 1.0 / contrast.clamp(min=0.5))
+        B = B.view(batch_size, -1, 1, 1)
         
-        # Điều chỉnh theo độ phóng đại vỏ não
-        sigmas = size_base * (self.r2s / (M + 1e-9))
+        spread_adjusted = self.spread * spread_scale
+        size_base = torch.sqrt(I / spread_adjusted)
         
-        # Đổi sang pixel
+        sigmas = size_base.view(batch_size, -1, 1, 1) * (self.r2s / (M + 1e-9)) * size_scale.view(batch_size, 1, 1, 1)
+        
         sigma_px = sigmas * self.deg2pix
-        sigma_px = torch.clamp(sigma_px, min=0.5)
-
-        # 2.3. Render ảnh (Gaussian Rendering)
-        dist2 = self.state['dist2']
+        sigma_px = torch.clamp(sigma_px, min=1.0)
         
-        # Công thức Gaussian: exp(-dist^2 / 2*sigma^2)
+        diff_x = (self.px - vx) * self.deg2pix
+        diff_y = (self.py - vy) * self.deg2pix
+        dist2 = diff_x**2 + diff_y**2
+        
         gauss = torch.exp(-dist2 / (2 * sigma_px**2))
         
-        # Tổng hợp: Sum(Gaussian * Brightness) trên trục N (số điện cực)
-        out = torch.sum(gauss * B, dim=1) # Kết quả: (B, H, W)
-        out = out.unsqueeze(1) # (B, 1, H, W)
-
-        # 2.4. Hậu xử lý (Brightness Modulation)
-        # Áp dụng đa thức a0...a4
-        c = self.state['coeffs']
-        out_poly = c['a0'] + c['a1']*out + c['a2']*(out**2) + c['a3']*(out**3) + c['a4']*(out**4)
-
-        return torch.clamp(out_poly, 0, 1)
-
-    def sigmoid(self, x):
-        return 1.0 / (1.0 + torch.exp(-x))
-
-    # Hàm Forward chuẩn của nn.Module (Kết nối 2 luồng)
-    def forward(self, stimulation, patient_params):
-        # Bước 1: Cấu hình
-        self.configure_model(patient_params)
+        out = torch.sum(gauss * B, dim=1)
+        out = out.unsqueeze(1)
         
-        # Bước 2: Kích thích
-        return self.produce_stimulation(stimulation)
+        out = out * 2.0
+        
+        return torch.clamp(out, 0, 1)
+
+
+# === HELPER FUNCTIONS ===
+
+def create_default_phi(batch_size=1, device='cpu'):
+    phi = torch.zeros(batch_size, 13, device=device)
+    phi[:, 3] = 1.0  # spread_scale
+    phi[:, 4] = 1.0  # brightness_scale
+    phi[:, 5] = 1.0  # size_scale
+    phi[:, 6] = 1.0  # threshold_scale
+    phi[:, 7] = 1.0  # contrast
+    return phi
+
+
+def create_random_phi(batch_size=1, device='cpu', seed=None):
+    """
+    Tạo patient params ngẫu nhiên cho training
+    
+    Ranges:
+        x_shift, y_shift: [-2, 2] mm
+        rotation: [-15, 15] độ
+        spread_scale: [0.5, 2.0]
+        brightness_scale: [0.5, 2.0]
+        size_scale: [0.5, 2.0]
+        threshold_scale: [0.5, 2.0]
+        contrast: [0.5, 2.0]
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+    
+    phi = torch.zeros(batch_size, 13, device=device)
+    
+    # Geometry
+    phi[:, 0] = torch.rand(batch_size, device=device) * 4 - 2      # x_shift: [-2, 2]
+    phi[:, 1] = torch.rand(batch_size, device=device) * 4 - 2      # y_shift: [-2, 2]
+    phi[:, 2] = torch.rand(batch_size, device=device) * 30 - 15    # rotation: [-15, 15]
+    
+    # Scales (0.5 to 2.0)
+    phi[:, 3] = torch.rand(batch_size, device=device) * 1.5 + 0.5  # spread_scale
+    phi[:, 4] = torch.rand(batch_size, device=device) * 1.5 + 0.5  # brightness_scale
+    phi[:, 5] = torch.rand(batch_size, device=device) * 1.5 + 0.5  # size_scale
+    phi[:, 6] = torch.rand(batch_size, device=device) * 1.5 + 0.5  # threshold_scale
+    phi[:, 7] = torch.rand(batch_size, device=device) * 1.5 + 0.5  # contrast
+    
+    return phi
+
+
+def expand_phi_to_feature_maps(phi, height, width):
+    """    
+    Args:
+        phi: (B, 13) patient parameters
+        height, width: kích thước ảnh
+        
+    Returns:
+        phi_maps: (B, 13, H, W)
+    """
+    batch_size = phi.shape[0]
+    phi_maps = phi.view(batch_size, 13, 1, 1).expand(-1, -1, height, width)
+    return phi_maps
