@@ -137,7 +137,7 @@ class Representer(nn.Module):
             # Tuy nhiên, cách an toàn là dùng AdaptiveAvgPool trước khi Flatten
             self.gap = nn.AdaptiveAvgPool2d((4, 4)) 
             self.lin1 = nn.Linear(32 * 4 * 4, 1024) 
-            self.lin2 = nn.Linear(1024, 650)
+            self.lin2 = nn.Linear(1024, 1024)
 
         self.tan = nn.Tanh()
 
