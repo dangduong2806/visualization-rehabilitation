@@ -299,9 +299,9 @@ for epoch in range(EPOCHS):
         with open(LOG_DIR, 'a') as file:
             file.write('LOSS train {} valid {}, valid-acc {} \n'.format(avg_loss, avg_vloss, avg_vacc))
         # saving the spv
-        repr_org = encoder(vis_imgs)
+        repr_org = encoder(vis_imgs, patient_params=norm_params)
         print(repr_org.shape)
-        spv = simulator(repr_org)
+        spv = simulator(repr_org, phi=real_params)
             
         visualizeBatch(vis_imgs, repr_org, spv, plt, epoch_number)
 
