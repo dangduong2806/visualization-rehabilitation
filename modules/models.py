@@ -50,10 +50,10 @@ class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode='replicate'),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=1),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode='replicate'),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode=1),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(inplace=True)
         )
@@ -78,7 +78,7 @@ class Up(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         # Dùng Bilinear upsampling thay vì TransposeConv để giảm checkerboard artifacts (thường tốt hơn cho bài toán này)
-        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.conv = DoubleConv(in_channels, out_channels)
 
     def forward(self, x1, x2):
