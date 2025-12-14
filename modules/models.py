@@ -50,10 +50,10 @@ class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=1),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode="replicate"),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode=1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode="replicate"),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(inplace=True)
         )
