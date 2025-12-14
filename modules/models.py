@@ -78,7 +78,7 @@ class Up(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         # Dùng Bilinear upsampling thay vì TransposeConv để giảm checkerboard artifacts (thường tốt hơn cho bài toán này)
-        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.conv = DoubleConv(in_channels, out_channels)
 
     def forward(self, x1, x2):
@@ -137,7 +137,7 @@ class Representer(nn.Module):
             # Tuy nhiên, cách an toàn là dùng AdaptiveAvgPool trước khi Flatten
             self.gap = nn.AdaptiveAvgPool2d((4, 4)) 
             self.lin1 = nn.Linear(32 * 4 * 4, 1024) 
-            self.lin2 = nn.Linear(1024, 650)
+            self.lin2 = nn.Linear(1024, 1024)
 
         self.tan = nn.Tanh()
 

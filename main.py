@@ -21,6 +21,8 @@ import tqdm
 # IMPORT THE NEW FUNCTION
 from utils import generate_random_params, normalize_params
 
+from modules.bio_simulator import BioSimulatorHILO, generate_random_params, normalize_params
+
 DEVICE = torch.device('cuda:0')
 
 
@@ -58,7 +60,10 @@ sightedUnit = SightedRecognizer(resNetModel, FEAT_LAYERS_N)
 for param in sightedUnit.parameters():
     param.requires_grad = False
 
-encoder = Representer(arryaOut=(SIMULATOR=="biological"))   # initialize the encoder
+encoder = Representer(
+    n_channels=3,
+    n_patient_params=13,
+    arryaOut=(SIMULATOR=="biological"))   # initialize the encoder
 
 # divide a resnet model into first N layers and after that. Use them to create to parts of the blind unit
 blindUnit_feat_pre, blindUnit_classifier_pre = divideModel(resNetModel2, FEAT_LAYERS_N)
@@ -72,7 +77,14 @@ if SIMULATOR=="regular":
     pMask = get_pMask_jaap()
     simulator = E2E_PhospheneSimulator_jaap(pMask=pMask, device=DEVICE)
 elif SIMULATOR=="biological":
-    simulator = Simulator_exp4(device=DEVICE, pMap_from_file="/scratch-shared/anejad/phosphene_map_exp4.pt")
+    # --- CẬP NHẬT MỚI ---
+    # Khởi tạo simulator chuẩn HILO (Human-In-The-Loop / Patient-Specific)
+    simulator = BioSimulatorHILO(
+        device=DEVICE, 
+        grid_shape=(32, 32), 
+        output_size=(IMG_SIZE, IMG_SIZE)
+    )
+    print("Đã khởi tạo BioSimulatorHILO với Patient Parameters.")
 
 # log the number of parameters for training
 print("Num of params for sightedUnit:")
@@ -156,7 +168,7 @@ def train_one_epoch(epoch_index, tb_writer):
         else:
             # Dynaphos Simulator: Cần nhận kích thích + tham số vật lý
             # Lưu ý: Bạn cần đảm bảo hàm forward của simulator chấp nhận tham số này
-            spv = simulator(repr_org, real_params)
+            spv = simulator(repr_org, phi=real_params)
 
         blindVision = blindUnit_feat(spv)
     
@@ -264,7 +276,7 @@ for epoch in range(EPOCHS):
             else:
                 # Dynaphos Simulator: Cần nhận kích thích + tham số vật lý
                 # Lưu ý: Bạn cần đảm bảo hàm forward của simulator chấp nhận tham số này
-                spv = simulator(repr_org, real_params)
+                spv = simulator(repr_org, phi=real_params)
                     
             blindVision = blindUnit_feat(spv)
             blindPred = blindUnit_classifier(blindVision)
