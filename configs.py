@@ -1,7 +1,7 @@
 ######### GLOBAL PARAMS
 FEAT_LAYERS_N = 6       # The layer to compare perception loss within ResNet
 
-BATCH_SIZE = 8 ### Sửa ở đây
+BATCH_SIZE = 4 ### Sửa ở đây (min là 4)
 
 LAMBDA = 0.75            # lambda * spatial loss + (1-lambda) * CE loss
 LEARNING_RATE = 0.0001
