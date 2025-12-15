@@ -221,10 +221,16 @@ class BioSimulatorHILO(nn.Module):
             flat = flat[:, self.idx]
             
         # Bắt đầu sửa đổi an toàn
+        # Đảm bảo đầu vào từ Encoder không có NaN hoặc số âm vô lý
+        flat = torch.clamp(flat, 0.0, 1.0)
+
         I = flat * 80.0e-6
         
         I_eff = torch.relu(I - self.rheo)
         Q = I_eff * self.pw * self.freq
+        
+        # Clamp Q để tránh B_logit quá lớn gây bão hòa sigmoid (dù sigmoid an toàn, nhưng gradient thì không)
+        Q = torch.clamp(Q, max=1.0)
         
         B_logit = self.slope * (Q - self.half)
         B = self.sigmoid(B_logit)
@@ -241,11 +247,11 @@ class BioSimulatorHILO(nn.Module):
         rho_normalized = rho / 4.75
         spread_adjusted = self.spread_base * rho_normalized
         
-        size_base = torch.sqrt(I / (spread_adjusted + 1e-8))
-        sigmas = size_base.view(batch_size, -1, 1, 1) * (self.r2s / (M + 1e-8))
+        size_base = torch.sqrt((I / (spread_adjusted + 1e-6)) + 1e-8)
+        sigmas = size_base.view(batch_size, -1, 1, 1) * (self.r2s / (M + 1e-6))
         
         sigma_px = sigmas * self.deg2pix
-        sigma_px = torch.clamp(sigma_px, min=0.5, max=50.0)
+        sigma_px = torch.clamp(sigma_px, min=1.0, max=30.0)
         
         diff_x = (self.px - vx) * self.deg2pix
         diff_y = (self.py - vy) * self.deg2pix
@@ -260,9 +266,10 @@ class BioSimulatorHILO(nn.Module):
         
         out = out * 2.0
         
-        # [SAFETY 4] QUAN TRỌNG NHẤT: Clamp giá trị trước khi đưa vào đa thức bậc 4
-        # Nếu out > 2 hoặc 3, out^4 sẽ cực lớn -> Gradient Explosion -> Loss NaN
-        out_clamped = torch.clamp(out, 0.0, 3.0)
+        # Trước khi đưa vào đa thức bậc 4, BẮT BUỘC phải kẹp về [0, 1].
+        # Nếu out=2, out^4=16 -> gradient lớn.
+        # Nếu out=10, out^4=10000 -> NaN ngay lập tức.
+        out_clamped = torch.clamp(out, 0.0, 1.0)
         
         out = self._apply_polynomial_brightness(out_clamped, params)
         
