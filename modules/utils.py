@@ -6,23 +6,43 @@ from configs import FIGS_DIR, SIMULATOR
 
 ####### REPORT FUNCTIONS 
 def visualizeBatch(imgs, activMaps, spvs, plt, ep):
-  
-  f, axarr = plt.subplots(5,3)
-
-  for i in range(0,5):
-      
-    img = (imgs[i].clamp_(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-    # repr = (activMaps[i].clamp_(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-    if SIMULATOR != "biological": activeMap = (activMaps[i].clamp_(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-    spv = (spvs[i].clamp_(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-    # img = torch.reshape(torch.squeeze(outputs), (56, 56, 3)).detach().numpy()
-    axarr[i,0].imshow(img)
-    axarr[i, 1].imshow(spv, cmap="gray")
-
-    if SIMULATOR != "biological": axarr[i, 2].imshow(activeMap, cmap="gray")
+    # 1. Lấy số lượng ảnh thực tế trong batch (Ví dụ: 4)
+    n_samples = imgs.shape[0]
     
-  plt.savefig(FIGS_DIR + '/res_'+str(ep)+'.png')
-  plt.close()
+    # 2. Giới hạn chỉ vẽ tối đa 5 ảnh để hình không quá to (nếu batch là 32 thì chỉ vẽ 5)
+    num_rows = min(n_samples, 5)
+    
+    # 3. Tạo subplot động
+    # squeeze=False để đảm bảo axarr luôn là mảng 2 chiều [row, col] ngay cả khi num_rows=1
+    f, axarr = plt.subplots(num_rows, 3, figsize=(10, 3 * num_rows), squeeze=False)
+
+    for i in range(num_rows):
+        # --- Cột 1: Input Image ---
+        img = (imgs[i].clamp(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
+        axarr[i, 0].imshow(img)
+        axarr[i, 0].axis('off') # Tắt trục tọa độ cho đẹp
+        if i == 0: axarr[i, 0].set_title("Input")
+
+        # --- Cột 2: Simulator Output ---
+        spv = (spvs[i].clamp(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
+        axarr[i, 1].imshow(spv, cmap="gray")
+        axarr[i, 1].axis('off')
+        if i == 0: axarr[i, 1].set_title("Sim Output")
+
+        # --- Cột 3: Activation Map (Chỉ cho Regular Simulator) ---
+        if SIMULATOR != "biological":
+            try:
+                # Chỉ vẽ nếu activMaps là dạng ảnh (C, H, W). Biological output là vector (1024) nên ko vẽ được
+                activeMap = (activMaps[i].clamp(0.0, 1.0).detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
+                axarr[i, 2].imshow(activeMap, cmap="gray")
+            except Exception:
+                pass # Bỏ qua nếu lỗi kích thước
+        
+        axarr[i, 2].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(FIGS_DIR + '/res_'+str(ep)+'.png')
+    plt.close()
 
 
 
