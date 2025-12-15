@@ -298,10 +298,23 @@ for epoch in range(EPOCHS):
         print('LOSS train {} valid {}'.format(avg_loss, avg_vloss))
         with open(LOG_DIR, 'a') as file:
             file.write('LOSS train {} valid {}, valid-acc {} \n'.format(avg_loss, avg_vloss, avg_vacc))
+            
         # saving the spv
-        repr_org = encoder(vis_imgs, patient_params=norm_params)
+        # 1. Lấy kích thước batch thực tế của ảnh cần hiển thị (vis_imgs đã lưu ở batch đầu)
+        # Ví dụ: vis_imgs có shape [4, 3, 256, 256] -> vis_n = 4
+        vis_n = vis_imgs.shape[0]
+        vis_real_params = generate_random_params(vis_n, device=DEVICE)
+        vis_norm_params = normalize_params(vis_real_params)
+
+        # Encoder nhận vis_norm_params (Shape khớp với vis_imgs)
+        repr_org = encoder(vis_imgs, patient_params=vis_norm_params)
+
         print(repr_org.shape)
-        spv = simulator(repr_org, phi=real_params)
+        # simulator nhận vis_real_params
+        if SIMULATOR == "interpol":
+             spv = T.Resize(size=IMG_SIZE)(repr_org)
+        else:
+             spv = simulator(repr_org, phi=vis_real_params)
             
         visualizeBatch(vis_imgs, repr_org, spv, plt, epoch_number)
 
