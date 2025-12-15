@@ -219,7 +219,8 @@ class BioSimulatorHILO(nn.Module):
             
             flat = stimulation.view(batch_size, -1)
             flat = flat[:, self.idx]
-        
+            
+        # Bắt đầu sửa đổi an toàn
         I = flat * 80.0e-6
         
         I_eff = torch.relu(I - self.rheo)
@@ -240,26 +241,30 @@ class BioSimulatorHILO(nn.Module):
         rho_normalized = rho / 4.75
         spread_adjusted = self.spread_base * rho_normalized
         
-        size_base = torch.sqrt(I / (spread_adjusted + 1e-9))
-        sigmas = size_base.view(batch_size, -1, 1, 1) * (self.r2s / (M + 1e-9))
+        size_base = torch.sqrt(I / (spread_adjusted + 1e-8))
+        sigmas = size_base.view(batch_size, -1, 1, 1) * (self.r2s / (M + 1e-8))
         
         sigma_px = sigmas * self.deg2pix
-        sigma_px = torch.clamp(sigma_px, min=1.0)
+        sigma_px = torch.clamp(sigma_px, min=0.5, max=50.0)
         
         diff_x = (self.px - vx) * self.deg2pix
         diff_y = (self.py - vy) * self.deg2pix
         dist2 = diff_x**2 + diff_y**2
         
-        decay = lambda_.view(batch_size, 1, 1, 1)
+        # decay = lambda_.view(batch_size, 1, 1, 1)
         
-        gauss = torch.exp(-dist2 / (2 * sigma_px**2))
+        gauss = torch.exp(-dist2 / (2 * sigma_px**2 + 1e-8))
         
         out = torch.sum(gauss * B, dim=1)
         out = out.unsqueeze(1)
         
         out = out * 2.0
         
-        out = self._apply_polynomial_brightness(out, params)
+        # [SAFETY 4] QUAN TRỌNG NHẤT: Clamp giá trị trước khi đưa vào đa thức bậc 4
+        # Nếu out > 2 hoặc 3, out^4 sẽ cực lớn -> Gradient Explosion -> Loss NaN
+        out_clamped = torch.clamp(out, 0.0, 3.0)
+        
+        out = self._apply_polynomial_brightness(out_clamped, params)
         
         return torch.clamp(out, 0, 1)
 
